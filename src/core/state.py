@@ -67,6 +67,9 @@ class GenerationState:
     # DSL 注入上下文（strengthen_dsl_injection=True 时由 Orchestrator 写入）
     dsl_injection: str = ""
 
+    # 存储历史语料检索结果文本；仅 history_rrf 模式下由 Orchestrator 写入
+    history_context: str = ""
+
     def to_prompt(self) -> str:
         """
         将当前状态转换为自然语言描述（显式状态注入的核心）
@@ -93,6 +96,11 @@ class GenerationState:
         if self.dsl_injection:
             lines.append("\n## DSL State To Follow")
             lines.append(self.dsl_injection)
+
+        #当history_content非空时，注入##Retrieved History Context段落到生成prompt
+        if self.history_context:
+            lines.append("\n## Retrieved Historical Context")
+            lines.append(self.history_context)
 
         if self.pending_goals:
             lines.append("\n## Pending Goals")

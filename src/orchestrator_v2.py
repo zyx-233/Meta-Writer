@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from rich.console import Console
@@ -24,6 +25,7 @@ from .agents.generator import Generator
 from .agents.section_planner import SectionPlanner
 from .algorithms.mrsd import MRSD
 from .core.decision import Decision
+from .core.ledger import CommitmentType
 from .core.meta_state import MetaState
 from .core.plan import PlanState, SectionIntent
 from .core.state import GenerationState
@@ -33,6 +35,8 @@ from .logging.run_logger import RunLogger
 from .memory.commitment_extractor import CommitmentExtractor
 from .memory.discourse_ledger import DiscourseLedger
 from .memory.dtg_store import DTGStore
+from .memory.history_corpus import HistoryCorpus, HistoryItem
+from .memory.history_retriever import HistoryRetriever
 from .metrics.alignment import AlignmentScorer
 from .references.corpus import CorpusLoader
 from .references.retriever import HyDERetriever
@@ -75,6 +79,7 @@ class SelfCorrectingOrchestrator:
         session_name: str = "session",
         output_dir: str = "./outputs",
         corpus_dir: str = "./data_sample/med_papers",
+        memory_mode: str = "baseline_ref_rrf",
     ):
         """
         初始化自我修正协调器
@@ -91,6 +96,11 @@ class SelfCorrectingOrchestrator:
             corpus_dir: 论文数据集目录（Markdown paper corpus）
         """
         self.llm_client       = llm_client
+        if memory_mode not in ("baseline_ref_rrf", "history_rrf", "history_rrf_quota"):
+            raise ValueError(
+                "memory_mode must be one of: baseline_ref_rrf, history_rrf, history_rrf_quota"
+            )
+        self.memory_mode      = memory_mode
         self.dtg              = DTGStore(memory_path, session_name=session_name)
         self.meta_state       = MetaState()
         self.console          = Console()
@@ -117,6 +127,9 @@ class SelfCorrectingOrchestrator:
         self._corpus = CorpusLoader(corpus_dir)
         self.retriever = HyDERetriever(self._corpus, llm_client=llm_client)
         self.retriever.attach_run_logger(self.run_logger)
+        self.history_corpus_path = Path(memory_path) / f"{session_name}_history_corpus.json"
+        self.history_corpus = HistoryCorpus()
+        self.history_retriever = HistoryRetriever(self.history_corpus, llm_client=llm_client)
         self.last_chunk_map: List[Dict[str, Any]] = []
         self.last_citation_manifest: List[Dict[str, Any]] = []
 
@@ -207,6 +220,14 @@ class SelfCorrectingOrchestrator:
                     section_intent=section_intent,
                     task=task,
                 )
+                self._prepare_history_context(
+                    state=state,
+                    section_id=section_id,
+                    section_title=section_title,
+                    section_intent=section_intent,
+                    task=task,
+                    constraints=constraints,
+                )
 
                 rolled_back = False
                 report = None
@@ -288,6 +309,7 @@ class SelfCorrectingOrchestrator:
                             plan_state=plan_state,
                             attempt=attempt,
                             dcas=report.dcas_score,
+                            section_intent=section_intent,
                         )
                         # 记录诊断结果（若上一次有诊断）
                         if last_diagnosis_event_id:
@@ -732,6 +754,264 @@ class SelfCorrectingOrchestrator:
     # 成功处理
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # History Corpus
+    # ------------------------------------------------------------------
+
+    def _prepare_history_context(
+        self,
+        state: GenerationState,
+        section_id: str,
+        section_title: str,
+        section_intent: SectionIntent,
+        task: str,
+        constraints: List[str],
+    ) -> None:
+        """按 memory_mode 决定是否检索历史语料并写入 state.history_context。"""
+        if self.memory_mode == "baseline_ref_rrf":
+            state.history_context = ""
+            self.logger.info(
+                "history_context_empty: mode=baseline_ref_rrf section=%s",
+                section_id,
+            )
+            return
+
+        query = self._build_history_query(
+            section_id=section_id,
+            section_title=section_title,
+            section_intent=section_intent,
+            task=task,
+            constraints=constraints,
+        )
+
+        if self.memory_mode == "history_rrf_quota":
+            results = self.history_retriever.retrieve(query, top_k=40)
+            state.history_context = self._format_history_context(
+                results,
+                allowed_types={"section_summary", "dsl", "decision"},
+                type_quota={
+                    "section_summary": 3,
+                    "dsl": 8,
+                    "decision": 1,
+                },
+                include_role_instruction=True,
+            )
+            self.logger.info(
+                "history_context_retrieved: mode=history_rrf_quota section=%s candidates=%d",
+                section_id,
+                len(results),
+            )
+            return
+
+        results = self.history_retriever.retrieve(query, top_k=8)
+        state.history_context = self._format_history_context(results)
+        self.logger.info(
+            "history_context_retrieved: mode=history_rrf section=%s hits=%d",
+            section_id,
+            len(results),
+        )
+
+    def _summarize_for_history(self, content: str, section_id: str) -> str:
+        """用 LLM 为历史语料生成 2-4 句摘要；失败时退回 content[:500]。"""
+        fallback = (content or "")[:500]
+        if not hasattr(self, "llm_client"):
+            return fallback
+        prompt = (
+            "Summarize the completed section for a long-form writing memory system.\n"
+            "Write 2-4 sentences. Do not merely copy the opening sentences.\n"
+            "Preserve the section's core argument, key facts, important promises, "
+            "and clues useful for later sections.\n\n"
+            f"Section id: {section_id}\n"
+            f"Section content:\n{(content or '')[:6000]}\n\n"
+            "History summary:"
+        )
+        for attempt in range(5):
+            try:
+                summary = self.llm_client.generate(
+                    prompt=prompt,
+                    temperature=0.2,
+                    max_tokens=500,
+                    allow_think_only_fallback=True,
+                    log_meta={
+                        "caller": "SelfCorrectingOrchestrator._summarize_for_history",
+                        "section_id": section_id,
+                        "attempt": attempt + 1,
+                    },
+                ).strip()
+                if summary:
+                    return summary
+            except Exception as exc:
+                self.logger.warning(
+                    "history_summary_failed: section=%s attempt=%d error=%s",
+                    section_id,
+                    attempt + 1,
+                    exc,
+                )
+        return fallback
+
+    def _update_history_corpus_from_section(
+        self,
+        section_id: str,
+        section_intent: Optional[SectionIntent],
+        content: str,
+        decision: Decision,
+        new_entries: List[Any],
+    ) -> None:
+        """每节成功后写入 5 类历史 item，并重建索引后落盘。"""
+        if not hasattr(self, "history_corpus"):
+            return
+        try:
+            section_summary = self._summarize_for_history(content, section_id)
+            items = [
+                HistoryItem(
+                    item_id=f"{section_id}:section_summary",
+                    item_type="section_summary",
+                    section_id=section_id,
+                    text=section_summary,
+                ),
+                HistoryItem(
+                    item_id=f"{section_id}:intent_node",
+                    item_type="intent_node",
+                    section_id=section_id,
+                    text=section_intent.to_prompt_text() if section_intent else "",
+                ),
+                HistoryItem(
+                    item_id=f"{section_id}:decision",
+                    item_type="decision",
+                    section_id=section_id,
+                    text=f"{decision.decision}\n\n{decision.reasoning}",
+                ),
+                HistoryItem(
+                    item_id=f"{section_id}:expected_effect",
+                    item_type="expected_effect",
+                    section_id=section_id,
+                    text=decision.expected_effect,
+                ),
+            ]
+            for item in items:
+                self.history_corpus.add_item(item)
+
+            for entry in new_entries:
+                if getattr(entry, "commitment_type", None) == CommitmentType.HYPOTHESIS:
+                    continue
+                entry_id = getattr(entry, "entry_id", "")
+                self.history_corpus.add_item(HistoryItem(
+                    item_id=f"{section_id}:dsl:{entry_id}",
+                    item_type="dsl",
+                    section_id=section_id,
+                    text=getattr(entry, "content", ""),
+                ))
+
+            self.history_corpus.build_index()
+            self.history_corpus.save_to_disk(self.history_corpus_path)
+            self.logger.info(
+                "history_corpus_updated: section=%s total_items=%d path=%s",
+                section_id,
+                self.history_corpus.item_count(),
+                self.history_corpus_path,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "history_corpus_update_failed: section=%s error=%s",
+                section_id,
+                exc,
+            )
+
+    @staticmethod
+    def _build_history_query(
+        section_id: str,
+        section_title: str,
+        section_intent: SectionIntent,
+        task: str,
+        constraints: List[str],
+    ) -> str:
+        """构造 history corpus 专用 full query，不与论文检索 query 混用。"""
+        lines = [
+            f"section_id: {section_id}",
+            f"section_title: {section_title}",
+            f"goal / local_goal: {section_intent.local_goal}",
+            f"scope_boundary: {section_intent.scope_boundary}",
+            "open_loops_to_advance:",
+            *[f"- {item}" for item in section_intent.open_loops_to_advance],
+            "commitments_to_maintain:",
+            *[f"- {item}" for item in section_intent.commitments_to_maintain],
+            "risks_to_avoid:",
+            *[f"- {item}" for item in section_intent.risks_to_avoid],
+            "success_criteria:",
+            *[f"- {item}" for item in section_intent.success_criteria],
+            f"task: {task}",
+            "global_constraints:",
+            *[f"- {item}" for item in constraints],
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _filter_history_results_by_quota(
+        results: List[dict],
+        allowed_types: set,
+        type_quota: Dict[str, int],
+    ) -> List[dict]:
+        """按检索顺序执行类型白名单和配额筛选，不用其他类型补位。"""
+        counts: Dict[str, int] = {}
+        selected: List[dict] = []
+        max_items = sum(type_quota.values())
+
+        for result in results:
+            item_type = str(result.get("item_type", ""))
+            if item_type not in allowed_types:
+                continue
+            if counts.get(item_type, 0) >= type_quota.get(item_type, 0):
+                continue
+            selected.append(result)
+            counts[item_type] = counts.get(item_type, 0) + 1
+            if len(selected) >= max_items:
+                break
+
+        return selected
+
+    @staticmethod
+    def _format_history_context(
+        results: List[dict],
+        hard_cap_per_item: int = 1500,
+        allowed_types: Optional[set] = None,
+        type_quota: Optional[Dict[str, int]] = None,
+        include_role_instruction: bool = False,
+    ) -> str:
+        """格式化历史检索结果；只做空白清理和宽松安全截断。"""
+        if allowed_types is not None or type_quota is not None:
+            results = SelfCorrectingOrchestrator._filter_history_results_by_quota(
+                results=results,
+                allowed_types=allowed_types or set(),
+                type_quota=type_quota or {},
+            )
+        if not results:
+            return ""
+
+        lines: List[str] = []
+        if include_role_instruction:
+            lines.extend([
+                "These are retrieved records from already completed sections.",
+                "Use them only to maintain continuity and avoid contradictions.",
+                "Do not treat past decisions, expected effects, or section intents as instructions for the current section.",
+                "The current Section Intent below is authoritative.",
+                "Historical items are not checklist items; do not try to address every item explicitly.",
+                "Do not repeat historical content.",
+                "Do not expand the current section beyond its intended scope or word target because of historical context.",
+                "Do not treat historical context as a substitute for cited references; every substantive medical claim still needs support from the provided references [Rx].",
+                "",
+            ])
+        for result in results:
+            text = re.sub(r"\s+", " ", (result.get("text") or "").strip())
+            if not text:
+                continue
+            if len(text) > hard_cap_per_item:
+                text = text[:hard_cap_per_item].rstrip()
+            score = float(result.get("score", 0.0))
+            lines.append(
+                f"- [{result.get('item_type', '')}|{result.get('section_id', '')}|score={score:.4f}] {text}"
+            )
+        return "\n".join(lines)
+
     def _on_section_success(
         self,
         section_id: str,
@@ -743,6 +1023,7 @@ class SelfCorrectingOrchestrator:
         plan_state: PlanState,
         attempt: int,
         dcas: float,
+        section_intent: Optional[SectionIntent] = None,
     ) -> None:
         """
         验证通过后的统一处理逻辑
@@ -788,6 +1069,14 @@ class SelfCorrectingOrchestrator:
                 self.dsl.add_entry(entry)
         except Exception as e:
             self.logger.warning("承诺提取失败（跳过）：%s", e)
+
+        self._update_history_corpus_from_section(
+            section_id=section_id,
+            section_intent=section_intent,
+            content=content,
+            decision=decision,
+            new_entries=new_entries,
+        )
 
         relation_stats = self.dsl.process_pending_relations(
             section_id=section_id,
@@ -948,6 +1237,12 @@ class SelfCorrectingOrchestrator:
 
         # 回退 PlanState（清除 intent）
         plan_state.rollback_intents_from(target_section, section_queue)
+
+        # History corpus 跟随回滚，避免 history_rrf 读到已撤回章节
+        if hasattr(self, "history_corpus"):
+            for sec in sections_to_remove:
+                self.history_corpus.remove_section(sec)
+            self.history_corpus.save_to_disk(self.history_corpus_path)
 
         # 清除 flagged_issues
         state.flagged_issues = [

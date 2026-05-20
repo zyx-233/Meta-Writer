@@ -50,6 +50,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the full generated text in the terminal.",
     )
+    parser.add_argument(
+        "--memory-mode",
+        choices=("baseline_ref_rrf", "history_rrf", "history_rrf_quota"),
+        default="baseline_ref_rrf",
+        help="Select memory experiment mode. baseline_ref_rrf does not inject history.",
+    )
     args = parser.parse_args()
 
     if args.all and (args.task_name or args.task_id):
@@ -164,6 +170,7 @@ def _build_task_input_snapshot(
     task_name: str,
     config: dict[str, object],
     session_name: str,
+    memory_mode: str = "baseline_ref_rrf",
 ) -> dict[str, object]:
     snapshot: dict[str, object] = {
         "framework": "meta_bench",
@@ -171,6 +178,7 @@ def _build_task_input_snapshot(
         "task_name": task_name,
         "task_id": _task_id_for_name(task_name),
         "session_name": session_name,
+        "memory_mode": memory_mode,
         "task": str(config["task"]),
         "constraints": list(config["constraints"]) if isinstance(config["constraints"], list) else [],
         "outline": dict(config["outline"]) if isinstance(config["outline"], dict) else {},
@@ -398,6 +406,7 @@ def _run_single_task(
     memory_dir: Path,
     print_response: bool,
     show_preview: bool,
+    memory_mode: str = "baseline_ref_rrf",
 ) -> dict[str, object]:
     from src.orchestrator_v2 import SelfCorrectingOrchestrator
     from src.utils.llm_client import LLMClient
@@ -433,6 +442,7 @@ def _run_single_task(
         session_name=session_name,
         output_dir=str(output_dir),
         corpus_dir=corpus_dir,
+        memory_mode=memory_mode,
     )
 
     final_text, _decisions, correction_log = orchestrator.generate_with_self_correction(
@@ -456,6 +466,7 @@ def _run_single_task(
         task_name=task_name,
         config=config,
         session_name=session_name,
+        memory_mode=memory_mode,
     )
     task_input_file = output_dir / f"{session_name}_task_input.json"
     _write_json(task_input_file, task_input_snapshot)
@@ -649,6 +660,7 @@ def main() -> None:
                 memory_dir=memory_dir,
                 print_response=bool(args.print_response),
                 show_preview=not is_batch_mode,
+                memory_mode=str(args.memory_mode),
             )
             batch_results.append(run_result)
             if is_batch_mode:
