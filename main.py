@@ -52,7 +52,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--memory-mode",
-        choices=("baseline_ref_rrf", "history_rrf", "history_rrf_quota"),
+        choices=("baseline_ref_rrf", "history_dense_quota"),
         default="baseline_ref_rrf",
         help="Select memory experiment mode. baseline_ref_rrf does not inject history.",
     )
@@ -449,6 +449,7 @@ def _run_single_task(
         task=task_description,
         constraints=constraints,
         outline=outline,
+        reference=config.get("reference") if isinstance(config.get("reference"), dict) else None,
     )
 
     correction_stats = correction_log.get_statistics()

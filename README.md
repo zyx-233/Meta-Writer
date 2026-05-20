@@ -46,6 +46,7 @@ benchmark：
 
 ```bash
 python main.py --task-id med_s010
+python main.py --task-id med_s001 --memory-mode history_dense_quota
 python main.py --all
 python -m main --task-id med_s010
 ```

@@ -67,7 +67,7 @@ class GenerationState:
     # DSL 注入上下文（strengthen_dsl_injection=True 时由 Orchestrator 写入）
     dsl_injection: str = ""
 
-    # 存储历史语料检索结果文本；仅 history_rrf 模式下由 Orchestrator 写入
+    # 存储历史语料检索结果文本；仅 history_dense_quota 模式下由 Orchestrator 写入
     history_context: str = ""
 
     def to_prompt(self) -> str:
