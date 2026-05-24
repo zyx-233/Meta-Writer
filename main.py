@@ -52,7 +52,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--memory-mode",
-        choices=("baseline_ref_rrf", "history_dense_quota"),
+        choices=("baseline_ref_rrf", "history_dense", "history_dense_quota"),
         default="baseline_ref_rrf",
         help="Select memory experiment mode. baseline_ref_rrf does not inject history.",
     )

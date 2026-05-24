@@ -99,9 +99,14 @@ class SelfCorrectingOrchestrator:
             corpus_dir: 论文数据集目录（Markdown paper corpus）
         """
         self.llm_client       = llm_client
-        if memory_mode not in ("baseline_ref_rrf", "history_rrf", "history_rrf_quota"):
+        memory_mode_aliases = {
+            "history_rrf": "history_dense",
+            "history_rrf_quota": "history_dense_quota",
+        }
+        memory_mode = memory_mode_aliases.get(memory_mode, memory_mode)
+        if memory_mode not in ("baseline_ref_rrf", "history_dense", "history_dense_quota"):
             raise ValueError(
-                "memory_mode must be one of: baseline_ref_rrf, history_rrf, history_rrf_quota"
+                "memory_mode must be one of: baseline_ref_rrf, history_dense, history_dense_quota"
             )
         self.memory_mode      = memory_mode
         self.dtg              = DTGStore(memory_path, session_name=session_name)
@@ -135,8 +140,8 @@ class SelfCorrectingOrchestrator:
         self.retriever = HyDERetriever(self._corpus)
         self.retriever.attach_run_logger(self.run_logger)
         self.history_corpus_path = Path(memory_path) / f"{session_name}_history_corpus.json"
-        self.history_corpus = HistoryCorpus()
-        self.history_retriever = HistoryRetriever(self.history_corpus, llm_client=llm_client)
+        self.history_corpus = HistoryCorpus(embed_model=self._embed_model)
+        self.history_retriever = HistoryRetriever(self.history_corpus)
         self.last_chunk_map: List[Dict[str, Any]] = []
         self.last_citation_manifest: List[Dict[str, Any]] = []
 
@@ -917,7 +922,7 @@ class SelfCorrectingOrchestrator:
             constraints=constraints,
         )
 
-        if self.memory_mode == "history_rrf_quota":
+        if self.memory_mode == "history_dense_quota":
             results = self.history_retriever.retrieve(query, top_k=40)
             state.history_context = self._format_history_context(
                 results,
@@ -930,7 +935,7 @@ class SelfCorrectingOrchestrator:
                 include_role_instruction=True,
             )
             self.logger.info(
-                "history_context_retrieved: mode=history_rrf_quota section=%s candidates=%d",
+                "history_context_retrieved: mode=history_dense_quota section=%s candidates=%d",
                 section_id,
                 len(results),
             )
@@ -939,7 +944,7 @@ class SelfCorrectingOrchestrator:
         results = self.history_retriever.retrieve(query, top_k=8)
         state.history_context = self._format_history_context(results)
         self.logger.info(
-            "history_context_retrieved: mode=history_rrf section=%s hits=%d",
+            "history_context_retrieved: mode=history_dense section=%s hits=%d",
             section_id,
             len(results),
         )
@@ -955,7 +960,7 @@ class SelfCorrectingOrchestrator:
             "Preserve the section's core argument, key facts, important promises, "
             "and clues useful for later sections.\n\n"
             f"Section id: {section_id}\n"
-            f"Section content:\n{(content or '')[:6000]}\n\n"
+            f"Section content:\n{content or ''}\n\n"
             "History summary:"
         )
         for attempt in range(5):
@@ -1105,7 +1110,6 @@ class SelfCorrectingOrchestrator:
     @staticmethod
     def _format_history_context(
         results: List[dict],
-        hard_cap_per_item: int = 1500,
         allowed_types: Optional[set] = None,
         type_quota: Optional[Dict[str, int]] = None,
         include_role_instruction: bool = False,
@@ -1137,8 +1141,6 @@ class SelfCorrectingOrchestrator:
             text = re.sub(r"\s+", " ", (result.get("text") or "").strip())
             if not text:
                 continue
-            if len(text) > hard_cap_per_item:
-                text = text[:hard_cap_per_item].rstrip()
             score = float(result.get("score", 0.0))
             lines.append(
                 f"- [{result.get('item_type', '')}|{result.get('section_id', '')}|score={score:.4f}] {text}"
@@ -1373,7 +1375,7 @@ class SelfCorrectingOrchestrator:
         # 回退 PlanState（清除 intent）
         plan_state.rollback_intents_from(target_section, section_queue)
 
-        # History corpus 跟随回滚，避免 history_rrf 读到已撤回章节
+        # History corpus 跟随回滚，避免 history_dense 读到已撤回章节
         if hasattr(self, "history_corpus"):
             for sec in sections_to_remove:
                 self.history_corpus.remove_section(sec)
