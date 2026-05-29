@@ -930,10 +930,10 @@ class SelfCorrectingOrchestrator:
             results = self.history_retriever.retrieve(query, top_k=40)
             state.history_context = self._format_history_context(
                 results,
-                allowed_types={"section_summary", "decision"},
+                allowed_types={"section_summary"},
                 type_quota={
                     "section_summary": 3,
-                    "decision": 1,
+                    "decision": 0,
                     "dsl": 0,
                 },
                 include_role_instruction=False,
@@ -948,10 +948,10 @@ class SelfCorrectingOrchestrator:
         results = self.history_retriever.retrieve(query, top_k=8)
         state.history_context = self._format_history_context(
             results,
-            allowed_types={"section_summary", "decision"},
+            allowed_types={"section_summary"},
             type_quota={
                 "section_summary": 3,
-                "decision": 1,
+                "decision": 0,
                 "dsl": 0,
             },
             include_role_instruction=False,
