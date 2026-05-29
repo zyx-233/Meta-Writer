@@ -1083,7 +1083,7 @@ class SelfCorrectingOrchestrator:
             f"goal / local_goal: {section_intent.local_goal}",
             f"scope_boundary: {section_intent.scope_boundary}",
             "open_loops_to_advance:",
-            *[f"- {item}" for item in section_intent.open_loops_to_advance],
+            *[f"- {item}" for item in getattr(section_intent, "open_loops_to_advance", [])],
             "commitments_to_maintain:",
             *[f"- {item}" for item in section_intent.commitments_to_maintain],
             "risks_to_avoid:",
