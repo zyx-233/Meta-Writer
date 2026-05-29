@@ -93,15 +93,6 @@ class GenerationState:
             for c in self.global_constraints:
                 lines.append(f"- {c}")
 
-        if self.dsl_injection:
-            lines.append("\n## DSL State To Follow")
-            lines.append(self.dsl_injection)
-
-        #当history_content非空时，注入##Retrieved History Context段落到生成prompt
-        if self.history_context:
-            lines.append("\n## Retrieved Historical Context")
-            lines.append(self.history_context)
-
         if self.pending_goals:
             lines.append("\n## Pending Goals")
             for g in self.pending_goals:

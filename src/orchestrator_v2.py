@@ -886,7 +886,11 @@ class SelfCorrectingOrchestrator:
             在当前 dsl_injection 基础上追加强调说明。
         """
         if state.dsl_injection:
-            state.dsl_injection = "[Important] Strictly follow the DSL state constraints below:\n" + state.dsl_injection
+            state.dsl_injection = (
+                "[Important] Treat the active discourse commitments below as continuity constraints. "
+                "The current Section Intent remains authoritative.\n"
+                + state.dsl_injection
+            )
 
     # ------------------------------------------------------------------
     # 成功处理
@@ -926,13 +930,13 @@ class SelfCorrectingOrchestrator:
             results = self.history_retriever.retrieve(query, top_k=40)
             state.history_context = self._format_history_context(
                 results,
-                allowed_types={"section_summary", "dsl", "decision"},
+                allowed_types={"section_summary", "decision"},
                 type_quota={
                     "section_summary": 3,
-                    "dsl": 8,
                     "decision": 1,
+                    "dsl": 0,
                 },
-                include_role_instruction=True,
+                include_role_instruction=False,
             )
             self.logger.info(
                 "history_context_retrieved: mode=history_dense_quota section=%s candidates=%d",
@@ -942,7 +946,16 @@ class SelfCorrectingOrchestrator:
             return
 
         results = self.history_retriever.retrieve(query, top_k=8)
-        state.history_context = self._format_history_context(results)
+        state.history_context = self._format_history_context(
+            results,
+            allowed_types={"section_summary", "decision"},
+            type_quota={
+                "section_summary": 3,
+                "decision": 1,
+                "dsl": 0,
+            },
+            include_role_instruction=False,
+        )
         self.logger.info(
             "history_context_retrieved: mode=history_dense section=%s hits=%d",
             section_id,

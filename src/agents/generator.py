@@ -224,6 +224,11 @@ class Generator:
 
         reference_block = self._build_reference_block(section_papers)
         citation_instructions = self._build_citation_instructions(section_papers)
+        unified_history_memory = self._build_unified_history_memory(
+            active_dsl=state.dsl_injection,
+            retrieved_history=state.history_context,
+            recent_content=truncated,
+        )
 
         # 引用重试警告：仅在 orchestrator 检测到上一轮引用密度不足时注入，
         # 紧贴 JSON 输出规范正前方，利用 recency 效应最大化约束遵循率。
@@ -249,7 +254,7 @@ class Generator:
             f"{word_count_instruction}"
             f"{reference_block}"
             f"{citation_instructions}"
-            f"\nRecent content:\n{truncated}"
+            f"{unified_history_memory}"
             f"\n\nCurrent task:\n{task}"
             f"{citation_warning}"
             f"{length_warning}"
@@ -274,6 +279,33 @@ class Generator:
             " If you need to refer to an earlier section, describe it by its role or topic"
             " (e.g., 'the scope section', 'the limitations section', 'the preceding section', 'as discussed earlier')."
             "\n- referenced_section_ids: a list of cited earlier section IDs such as [\"sec1\", \"sec2\"]"
+        )
+
+    def _build_unified_history_memory(
+        self,
+        active_dsl: str,
+        retrieved_history: str,
+        recent_content: str,
+    ) -> str:
+        active_dsl = active_dsl.strip() if active_dsl else "(none)"
+        retrieved_history = retrieved_history.strip() if retrieved_history else "(none)"
+        recent_content = recent_content.strip() if recent_content else "(none)"
+        return (
+            "\n\n## Unified Historical Memory\n\n"
+            "Use this memory only for continuity and consistency.\n"
+            "Do not treat it as external evidence.\n"
+            "Use Available References for factual claims and citations.\n"
+            "The current Section Intent is authoritative.\n"
+            "Do not treat historical decisions, expected effects, or section intents as instructions for the current section.\n"
+            "Historical items are not checklist items; do not try to address every item explicitly.\n"
+            "Do not repeat historical content unless needed for coherence.\n"
+            "Do not expand the current section beyond its intended scope or word target because of historical context.\n\n"
+            "### Active Discourse Commitments\n\n"
+            f"{active_dsl}\n\n"
+            "### Retrieved Historical Context\n\n"
+            f"{retrieved_history}\n\n"
+            "### Recent Previous Content\n\n"
+            f"{recent_content}"
         )
 
     @staticmethod
