@@ -1090,9 +1090,6 @@ class SelfCorrectingOrchestrator:
             *[f"- {item}" for item in section_intent.risks_to_avoid],
             "success_criteria:",
             *[f"- {item}" for item in section_intent.success_criteria],
-            f"task: {task}",
-            "global_constraints:",
-            *[f"- {item}" for item in constraints],
         ]
         return "\n".join(lines)
 
